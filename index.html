@@ -576,53 +576,125 @@ function loadVideo(file){
 }
 
 // ═══════════════════════════════════
-// GRABACIÓN DE PANTALLA
+// GRABACIÓN DE PANTALLA CON AUDIO MEZCLADO
 // ═══════════════════════════════════
-document.getElementById('bRec').onclick=function(){ recOn ? stopRec() : startRec(); };
+document.getElementById('bRec').onclick = function(){ recOn ? stopRec() : startRec(); };
+
+var audioCtxRec = null; // AudioContext de grabación
 
 function startRec(){
-  recChunks=[]; recOn=true;
-  var audioTracks=[];
-  function doStart(){
-    var vs = rc.captureStream(30);
-    var combined = new MediaStream(vs.getVideoTracks().concat(audioTracks));
-    var mimes=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm','video/mp4'];
-    var mime='';
-    for(var i=0;i<mimes.length;i++){
-      if(typeof MediaRecorder!=='undefined'&&MediaRecorder.isTypeSupported(mimes[i])){mime=mimes[i];break;}
+  recChunks = []; recOn = true;
+
+  // Pedir micrófono
+  navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    .then(function(micStream){ doStartRec(micStream); })
+    .catch(function(){
+      // Sin micrófono: grabar igual solo con audio de videos
+      doStartRec(null);
+    });
+}
+
+function doStartRec(micStream){
+  // ── Mezclar audio con AudioContext ──────────────────────
+  var audioTracks = [];
+  try {
+    audioCtxRec = new (window.AudioContext || window.webkitAudioContext)();
+    var dest = audioCtxRec.createMediaStreamDestination();
+
+    // 1. Micrófono
+    if(micStream && micStream.getAudioTracks().length > 0){
+      var micSrc = audioCtxRec.createMediaStreamSource(micStream);
+      var micGain = audioCtxRec.createGain();
+      micGain.gain.value = 1.0;
+      micSrc.connect(micGain);
+      micGain.connect(dest);
     }
-    try{ mediaRec=mime?new MediaRecorder(combined,{mimeType:mime}):new MediaRecorder(combined); }
-    catch(_){ mediaRec=new MediaRecorder(combined); }
-    mediaRec.ondataavailable=function(e){ if(e.data&&e.data.size>0) recChunks.push(e.data); };
-    mediaRec.onstop=saveRec;
-    mediaRec.start(100);
-    document.getElementById('bRec').textContent='⏹ Detener';
-    document.getElementById('bRec').classList.add('rec','on');
-    document.getElementById('recBadge').classList.add('show');
-    notif('⏺ Grabando pantalla con audio');
+
+    // 2. Audio de cada video adjunto que esté reproduciéndose
+    objs.forEach(function(o){
+      if(o.type === 'vid' && o.el){
+        try {
+          var vidSrc = audioCtxRec.createMediaElementSource(o.el);
+          var vidGain = audioCtxRec.createGain();
+          vidGain.gain.value = 1.0;
+          vidSrc.connect(vidGain);
+          vidGain.connect(dest);
+          // También conectar a los altavoces para que se siga escuchando
+          vidGain.connect(audioCtxRec.destination);
+          o._audioNode = vidSrc; // guardar referencia
+        } catch(e){
+          // Si el elemento ya tiene una fuente conectada, ignorar
+        }
+      }
+    });
+
+    audioTracks = dest.stream.getAudioTracks();
+  } catch(e){
+    // AudioContext no disponible — usar tracks del micrófono directamente
+    if(micStream) audioTracks = micStream.getAudioTracks();
   }
-  navigator.mediaDevices.getUserMedia({audio:true,video:false})
-    .then(function(as){ audioTracks=as.getAudioTracks(); doStart(); })
-    .catch(function(){ doStart(); });
+
+  // ── Canvas stream ──────────────────────────────────────
+  var vs = rc.captureStream(30);
+  var combined = new MediaStream(vs.getVideoTracks().concat(audioTracks));
+
+  var mimes = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+    'video/mp4'
+  ];
+  var mime = '';
+  for(var i = 0; i < mimes.length; i++){
+    if(typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mimes[i])){
+      mime = mimes[i]; break;
+    }
+  }
+
+  try {
+    mediaRec = mime
+      ? new MediaRecorder(combined, { mimeType: mime })
+      : new MediaRecorder(combined);
+  } catch(_){
+    mediaRec = new MediaRecorder(combined);
+  }
+
+  mediaRec.ondataavailable = function(e){
+    if(e.data && e.data.size > 0) recChunks.push(e.data);
+  };
+  mediaRec.onstop = saveRec;
+  mediaRec.start(100);
+
+  document.getElementById('bRec').textContent = '⏹ Detener';
+  document.getElementById('bRec').classList.add('rec','on');
+  document.getElementById('recBadge').classList.add('show');
+  notif('⏺ Grabando con audio — micrófono + videos');
 }
 
 function stopRec(){
-  recOn=false;
-  if(mediaRec&&mediaRec.state!=='inactive') mediaRec.stop();
-  document.getElementById('bRec').textContent='⏺ Grabar';
+  recOn = false;
+  if(mediaRec && mediaRec.state !== 'inactive') mediaRec.stop();
+  // Cerrar AudioContext
+  if(audioCtxRec){
+    try { audioCtxRec.close(); } catch(_){}
+    audioCtxRec = null;
+  }
+  document.getElementById('bRec').textContent = '⏺ Grabar';
   document.getElementById('bRec').classList.remove('rec','on');
   document.getElementById('recBadge').classList.remove('show');
 }
 
 function saveRec(){
   if(!recChunks.length){ notif('⚠️ Grabación vacía'); return; }
-  var blob=new Blob(recChunks,{type:recChunks[0].type||'video/webm'});
-  var ext=blob.type.includes('mp4')?'mp4':'webm';
-  var url=URL.createObjectURL(blob);
-  var a=document.createElement('a');
-  a.href=url; a.download='clase_'+Date.now()+'.'+ext; a.click();
-  setTimeout(function(){URL.revokeObjectURL(url);},8000);
-  notif('✅ Grabación guardada — '+ext.toUpperCase());
+  var blob = new Blob(recChunks, { type: recChunks[0].type || 'video/webm' });
+  var ext  = blob.type.includes('mp4') ? 'mp4' : 'webm';
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  a.href = url;
+  a.download = 'clase_' + Date.now() + '.' + ext;
+  a.click();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 8000);
+  notif('✅ Grabación guardada con audio — ' + ext.toUpperCase());
 }
 
 // ═══════════════════════════════════
@@ -685,35 +757,69 @@ function createVidCtrl(o){
   });
 
   // ── Progreso (seekbar) ────────────
-  var isSeeking = false;
+  var isSeeking  = false;
+  var wasPlaying = false;
 
-  // Actualizar barra mientras reproduce
   vid.addEventListener('timeupdate', function(){
     if(!isSeeking && vid.duration){
       prog.value = Math.round(vid.currentTime / vid.duration * 1000);
-      var tot = vid.duration;
-      var cur = vid.currentTime;
-      var m = Math.floor(cur/60);
-      var s = Math.floor(cur % 60);
-      var tm = Math.floor(tot/60);
-      var ts = Math.floor(tot % 60);
+      var cur = vid.currentTime, tot = vid.duration;
+      var m=Math.floor(cur/60), s=Math.floor(cur%60);
+      var tm=Math.floor(tot/60), ts=Math.floor(tot%60);
       timeLabel.textContent = m+':'+(s<10?'0':'')+s+' / '+tm+':'+(ts<10?'0':'')+ts;
     }
   });
 
-  // Al arrastrar la barra, pausar momentáneamente para evitar cortes
-  prog.addEventListener('mousedown',  function(){ isSeeking=true; });
-  prog.addEventListener('touchstart', function(){ isSeeking=true; }, {passive:true});
+  // Inicio del drag: pausar y recordar si estaba reproduciendo
+  prog.addEventListener('mousedown', function(){
+    isSeeking  = true;
+    wasPlaying = !vid.paused;
+    if(wasPlaying) vid.pause();
+  });
+  prog.addEventListener('touchstart', function(){
+    isSeeking  = true;
+    wasPlaying = !vid.paused;
+    if(wasPlaying) vid.pause();
+  }, {passive:true});
 
+  // Durante el drag: solo mover sin reproducir
   prog.addEventListener('input', function(){
     if(vid.duration){
-      // Solo mover el tiempo, no pausar
-      vid.currentTime = prog.value / 1000 * vid.duration;
+      var t = prog.value / 1000 * vid.duration;
+      try { vid.currentTime = t; } catch(e){}
     }
   });
 
-  prog.addEventListener('mouseup',  function(){ isSeeking=false; });
-  prog.addEventListener('touchend', function(){ isSeeking=false; }, {passive:true});
+  // Fin del drag: esperar seeked y reanudar si estaba reproduciendo
+  function onSeekEnd(){
+    if(!isSeeking) return;
+    isSeeking = false;
+    // Esperar a que el seek termine antes de reanudar
+    function doResume(){
+      if(wasPlaying){
+        vid.play().then(function(){
+          btnPlay.textContent = '⏸';
+        }).catch(function(){
+          // Segundo intento tras breve pausa
+          setTimeout(function(){
+            vid.play().then(function(){ btnPlay.textContent='⏸'; }).catch(function(){});
+          }, 400);
+        });
+      }
+    }
+    // Usar el evento seeked para saber cuándo está listo
+    if(vid.seeking){
+      vid.addEventListener('seeked', function onSeeked(){
+        vid.removeEventListener('seeked', onSeeked);
+        doResume();
+      });
+    } else {
+      doResume();
+    }
+  }
+
+  prog.addEventListener('mouseup',  onSeekEnd);
+  prog.addEventListener('touchend', onSeekEnd, {passive:true});
 
   // ── Mute ─────────────────────────
   btnMute.addEventListener('click', function(){
