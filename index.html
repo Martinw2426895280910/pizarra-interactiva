@@ -40,15 +40,29 @@ input[type=range]{accent-color:#3a86ff;cursor:pointer;flex-shrink:0;}
 #txWrap{position:absolute;display:none;z-index:90;}
 #txArea{background:rgba(0,0,0,.7);border:2px dashed #8338ec;color:#fff;padding:5px 8px;min-width:130px;font-family:inherit;outline:none;border-radius:7px;resize:none;user-select:text;-webkit-user-select:text;}
 
-/* controles de video flotantes */
-.vid-ctrl{
-  position:absolute;z-index:60;
-  background:rgba(0,0,0,.7);border-radius:20px;
-  display:flex;align-items:center;gap:6px;padding:4px 10px;
-  pointer-events:auto;
+/* BARRA DE VIDEO FIJA — aparece cuando hay un video seleccionado */
+#vidBar{
+  background:#1a1a2e;
+  border-top:1px solid #e040fb;
+  padding:5px 8px;
+  display:none;
+  flex-wrap:wrap;
+  gap:5px;
+  align-items:center;
+  flex-shrink:0;
+  z-index:100;
 }
-.vid-ctrl button{background:none;border:none;color:#fff;font-size:16px;cursor:pointer;padding:2px 4px;line-height:1;}
-.vid-ctrl input[type=range]{width:70px;accent-color:#e040fb;}
+#vidBar.show{display:flex;}
+#vidBar button{
+  background:#333;color:#fff;border:none;border-radius:7px;
+  padding:5px 10px;font-size:13px;font-weight:700;cursor:pointer;
+  flex-shrink:0;
+}
+#vidBar button:active{transform:scale(.9);}
+#vidProg{accent-color:#e040fb;cursor:pointer;flex:1;min-width:80px;}
+#vidTime{color:#aaa;font-size:10px;flex-shrink:0;min-width:72px;}
+#vidVol{accent-color:#e040fb;width:55px;flex-shrink:0;}
+#vidLabel{color:#e040fb;font-size:10px;flex-shrink:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
 /* panel selector de archivos */
 #filePanel{
@@ -96,6 +110,16 @@ input[type=range]{accent-color:#3a86ff;cursor:pointer;flex-shrink:0;}
   <div id="txWrap">
     <textarea id="txArea" rows="2" placeholder="Escribí… Enter=OK · Shift+Enter=nueva línea"></textarea>
   </div>
+</div>
+
+<!-- BARRA DE VIDEO FIJA — aparece cuando hay video seleccionado -->
+<div id="vidBar">
+  <span id="vidLabel">🎬 Video</span>
+  <button id="vBtnPlay">▶</button>
+  <input type="range" id="vidProg" min="0" max="1000" value="0">
+  <span id="vidTime">0:00 / 0:00</span>
+  <button id="vBtnMute">🔊</button>
+  <input type="range" id="vidVol" min="0" max="100" value="80">
 </div>
 
 <div id="tb2">
@@ -206,13 +230,7 @@ function drawFrame(c){
   });
 }
 
-function render(){
-  drawFrame(ctx);
-  if(selId!=null) drawHandles();
-  if(recOn) drawFrame(rctx);
-  requestAnimationFrame(render);
-}
-requestAnimationFrame(render);
+// render loop iniciado más abajo junto con updateVidBar
 
 function drawHandles(){
   var o=findObj(selId); if(!o) return;
@@ -511,24 +529,21 @@ function loadImage(file){
 }
 
 // ═══════════════════════════════════
+// ═══════════════════════════════════
 // CARGAR VIDEO — robusto para Android
 // ═══════════════════════════════════
 function loadVideo(file){
   if(!file.type.startsWith('video/')){notif('⚠️ Solo videos');return;}
   notif('⏳ Cargando video…');
-
   var url = URL.createObjectURL(file);
   var vid = document.createElement('video');
-
-  vid.playsInline  = true;
-  vid.muted        = false;
-  vid.preload      = 'auto';  // cargar todo el buffer, no solo metadata
+  vid.playsInline = true;
+  vid.muted       = false;
+  vid.preload     = 'auto';
   vid.setAttribute('playsinline','');
   vid.setAttribute('webkit-playsinline','');
-
-  // Guardar referencia al file para que el GC no lo elimine
-  vid._fileRef = file;
   vid._blobUrl = url;
+  vid._file    = file; // mantener referencia para evitar GC
 
   var ready = false;
   function onReady(){
@@ -536,330 +551,254 @@ function loadVideo(file){
     ready = true;
     var vw = vid.videoWidth  || 640;
     var vh = vid.videoHeight || 360;
-    var aspect = vw / vh;
-    var maxW = Math.min(W * 0.80, 480);
-    var iw = maxW, ih = maxW / aspect;
-    if(ih > H * 0.70){ ih = H * 0.70; iw = ih * aspect; }
+    var aspect = vw/vh;
+    var maxW = Math.min(W*0.82, 500);
+    var iw = maxW, ih = maxW/aspect;
+    if(ih > H*0.68){ ih = H*0.68; iw = ih*aspect; }
     iw = Math.round(iw); ih = Math.round(ih);
     var id  = objSeq++;
-    var obj = {id:id, type:'vid', el:vid, x:Math.round((W-iw)/2), y:Math.round((H-ih)/2), w:iw, h:ih, ctrl:null};
+    var obj = {id:id,type:'vid',el:vid,x:Math.round((W-iw)/2),y:Math.round((H-ih)/2),w:iw,h:ih};
     objs.push(obj);
     selId = id;
     setTool('select');
     showDelBtn(true);
-    createVidCtrl(obj);
-    notif('🎬 Video listo — tocá ▶ para reproducir con audio');
+    bindVidBar(obj);
+    notif('🎬 Video listo — tocá ▶ para reproducir');
   }
 
   vid.onloadedmetadata = onReady;
-  vid.oncanplay        = onReady;  // fallback si metadata no dispara
-  vid.onloadeddata     = onReady;  // segundo fallback
-
-  // Timeout de seguridad — si ningún evento dispara en 4s, intentar igual
+  vid.oncanplay        = onReady;
+  vid.onloadeddata     = onReady;
   setTimeout(function(){
-    if(!ready){
-      vid.load(); // forzar carga
-      setTimeout(function(){ if(!ready) onReady(); }, 1500);
-    }
-  }, 4000);
-
+    if(!ready){ vid.load(); setTimeout(function(){ if(!ready) onReady(); },1500); }
+  },4000);
   vid.onerror = function(){
-    if(!ready){
-      URL.revokeObjectURL(url);
-      notif('❌ Error al cargar el video. Probá con un archivo .mp4');
-    }
+    if(!ready){ URL.revokeObjectURL(url); notif('❌ Error. Probá con un .mp4'); }
   };
-
-  // Asignar src DESPUÉS de configurar todos los handlers
   vid.src = url;
   vid.load();
 }
 
 // ═══════════════════════════════════
-// GRABACIÓN DE PANTALLA CON AUDIO MEZCLADO
+// BARRA DE VIDEO FIJA (reemplaza controles flotantes)
 // ═══════════════════════════════════
-document.getElementById('bRec').onclick = function(){ recOn ? stopRec() : startRec(); };
+var vidBar   = document.getElementById('vidBar');
+var vBtnPlay = document.getElementById('vBtnPlay');
+var vidProg  = document.getElementById('vidProg');
+var vidTime  = document.getElementById('vidTime');
+var vBtnMute = document.getElementById('vBtnMute');
+var vidVol   = document.getElementById('vidVol');
+var vidLabel = document.getElementById('vidLabel');
 
-var audioCtxRec = null; // AudioContext de grabación
+var activeVid  = null;
+var isSeeking  = false;
+var wasPlaying = false;
+
+function fmt(s){
+  if(!s||isNaN(s)) return '0:00';
+  var m=Math.floor(s/60); s=Math.floor(s%60);
+  return m+':'+(s<10?'0':'')+s;
+}
+
+function bindVidBar(o){
+  activeVid = o.el;
+  activeVid.volume = 0.8;
+  vBtnPlay.textContent = activeVid.paused ? '▶' : '⏸';
+  vBtnMute.textContent = activeVid.muted  ? '🔇' : '🔊';
+  vidVol.value = Math.round(activeVid.volume*100);
+  vidBar.classList.add('show');
+}
+
+function hidVidBar(){
+  vidBar.classList.remove('show');
+}
+
+// Actualizar barra — llamado desde el render loop
+function updateVidBar(){
+  if(!activeVid || !activeVid.duration || isSeeking) return;
+  vidProg.value = Math.round(activeVid.currentTime/activeVid.duration*1000);
+  vidTime.textContent = fmt(activeVid.currentTime)+' / '+fmt(activeVid.duration);
+  // Sincronizar ícono
+  if(activeVid.ended || activeVid.paused){
+    vBtnPlay.textContent = '▶';
+  } else {
+    vBtnPlay.textContent = '⏸';
+  }
+}
+
+// ── Play / Pause ──────────────────
+vBtnPlay.addEventListener('click',function(){
+  if(!activeVid) return;
+  if(activeVid.paused || activeVid.ended){
+    activeVid.play()
+      .then(function(){ vBtnPlay.textContent='⏸'; })
+      .catch(function(){
+        setTimeout(function(){
+          if(activeVid) activeVid.play()
+            .then(function(){ vBtnPlay.textContent='⏸'; })
+            .catch(function(){});
+        },300);
+      });
+  } else {
+    activeVid.pause();
+    vBtnPlay.textContent='▶';
+  }
+});
+
+// ── Seekbar ───────────────────────
+function startSeek(){
+  if(!activeVid) return;
+  isSeeking  = true;
+  wasPlaying = !activeVid.paused;
+  if(wasPlaying) activeVid.pause();
+}
+function doSeek(){
+  if(!activeVid || !activeVid.duration) return;
+  activeVid.currentTime = vidProg.value/1000*activeVid.duration;
+}
+function endSeek(){
+  if(!activeVid || !isSeeking) return;
+  isSeeking = false;
+  if(!wasPlaying) return;
+  function resume(){
+    activeVid.play()
+      .then(function(){ vBtnPlay.textContent='⏸'; })
+      .catch(function(){
+        setTimeout(function(){
+          if(activeVid) activeVid.play()
+            .then(function(){ vBtnPlay.textContent='⏸'; })
+            .catch(function(){});
+        },400);
+      });
+  }
+  if(activeVid.seeking){
+    activeVid.addEventListener('seeked',function h(){ activeVid.removeEventListener('seeked',h); resume(); });
+  } else {
+    setTimeout(resume, 100);
+  }
+}
+
+vidProg.addEventListener('mousedown',  startSeek);
+vidProg.addEventListener('touchstart', startSeek, {passive:true});
+vidProg.addEventListener('input',      doSeek);
+vidProg.addEventListener('mouseup',    endSeek);
+vidProg.addEventListener('touchend',   endSeek,  {passive:true});
+
+// ── Mute / Volumen ────────────────
+vBtnMute.addEventListener('click',function(){
+  if(!activeVid) return;
+  activeVid.muted = !activeVid.muted;
+  vBtnMute.textContent = activeVid.muted ? '🔇' : '🔊';
+});
+vidVol.addEventListener('input',function(){
+  if(!activeVid) return;
+  activeVid.volume = vidVol.value/100;
+  activeVid.muted  = (activeVid.volume===0);
+  vBtnMute.textContent = activeVid.muted ? '🔇' : '🔊';
+});
+
+// ── Mostrar barra al tocar un video ──
+// Se integra en onUp del canvas
+var _onUp_orig = onUp;
+onUp = function(){
+  _onUp_orig();
+  if(selId!=null){
+    var o=findObj(selId);
+    if(o && o.type==='vid'){ bindVidBar(o); return; }
+  }
+  // Si no hay video seleccionado, ocultar barra (pero no pausar)
+  if(activeVid && !activeVid.paused) return; // dejar visible si está reproduciendo
+  hidVidBar();
+};
+
+// ═══════════════════════════════════
+// GRABACIÓN DE PANTALLA CON AUDIO
+// ═══════════════════════════════════
+document.getElementById('bRec').onclick=function(){ recOn ? stopRec() : startRec(); };
+var audioCtxRec = null;
 
 function startRec(){
-  recChunks = []; recOn = true;
-
-  // Pedir micrófono
-  navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-    .then(function(micStream){ doStartRec(micStream); })
-    .catch(function(){
-      // Sin micrófono: grabar igual solo con audio de videos
-      doStartRec(null);
-    });
+  recChunks=[]; recOn=true;
+  navigator.mediaDevices.getUserMedia({audio:true,video:false})
+    .then(function(mic){ doStartRec(mic); })
+    .catch(function(){  doStartRec(null); });
 }
 
 function doStartRec(micStream){
-  // ── Mezclar audio con AudioContext ──────────────────────
-  var audioTracks = [];
-  try {
-    audioCtxRec = new (window.AudioContext || window.webkitAudioContext)();
+  var audioTracks=[];
+  try{
+    audioCtxRec = new (window.AudioContext||window.webkitAudioContext)();
     var dest = audioCtxRec.createMediaStreamDestination();
-
-    // 1. Micrófono
-    if(micStream && micStream.getAudioTracks().length > 0){
-      var micSrc = audioCtxRec.createMediaStreamSource(micStream);
+    if(micStream && micStream.getAudioTracks().length>0){
+      var micSrc  = audioCtxRec.createMediaStreamSource(micStream);
       var micGain = audioCtxRec.createGain();
-      micGain.gain.value = 1.0;
-      micSrc.connect(micGain);
-      micGain.connect(dest);
+      micGain.gain.value=1.0;
+      micSrc.connect(micGain); micGain.connect(dest);
     }
-
-    // 2. Audio de cada video adjunto que esté reproduciéndose
     objs.forEach(function(o){
-      if(o.type === 'vid' && o.el){
-        try {
-          var vidSrc = audioCtxRec.createMediaElementSource(o.el);
-          var vidGain = audioCtxRec.createGain();
-          vidGain.gain.value = 1.0;
-          vidSrc.connect(vidGain);
-          vidGain.connect(dest);
-          // También conectar a los altavoces para que se siga escuchando
-          vidGain.connect(audioCtxRec.destination);
-          o._audioNode = vidSrc; // guardar referencia
-        } catch(e){
-          // Si el elemento ya tiene una fuente conectada, ignorar
-        }
+      if(o.type==='vid'&&o.el){
+        try{
+          var vs  = audioCtxRec.createMediaElementSource(o.el);
+          var vg  = audioCtxRec.createGain();
+          vg.gain.value=1.0;
+          vs.connect(vg); vg.connect(dest);
+          vg.connect(audioCtxRec.destination); // altavoces también
+        }catch(e){}
       }
     });
-
-    audioTracks = dest.stream.getAudioTracks();
-  } catch(e){
-    // AudioContext no disponible — usar tracks del micrófono directamente
-    if(micStream) audioTracks = micStream.getAudioTracks();
+    audioTracks=dest.stream.getAudioTracks();
+  }catch(e){
+    if(micStream) audioTracks=micStream.getAudioTracks();
   }
 
-  // ── Canvas stream ──────────────────────────────────────
-  var vs = rc.captureStream(30);
-  var combined = new MediaStream(vs.getVideoTracks().concat(audioTracks));
-
-  var mimes = [
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
-    'video/mp4'
-  ];
-  var mime = '';
-  for(var i = 0; i < mimes.length; i++){
-    if(typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mimes[i])){
-      mime = mimes[i]; break;
-    }
+  var vs=rc.captureStream(30);
+  var combined=new MediaStream(vs.getVideoTracks().concat(audioTracks));
+  var mimes=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm','video/mp4'];
+  var mime='';
+  for(var i=0;i<mimes.length;i++){
+    if(typeof MediaRecorder!=='undefined'&&MediaRecorder.isTypeSupported(mimes[i])){mime=mimes[i];break;}
   }
-
-  try {
-    mediaRec = mime
-      ? new MediaRecorder(combined, { mimeType: mime })
-      : new MediaRecorder(combined);
-  } catch(_){
-    mediaRec = new MediaRecorder(combined);
-  }
-
-  mediaRec.ondataavailable = function(e){
-    if(e.data && e.data.size > 0) recChunks.push(e.data);
-  };
-  mediaRec.onstop = saveRec;
+  try{ mediaRec=mime?new MediaRecorder(combined,{mimeType:mime}):new MediaRecorder(combined); }
+  catch(_){ mediaRec=new MediaRecorder(combined); }
+  mediaRec.ondataavailable=function(e){ if(e.data&&e.data.size>0) recChunks.push(e.data); };
+  mediaRec.onstop=saveRec;
   mediaRec.start(100);
-
-  document.getElementById('bRec').textContent = '⏹ Detener';
+  document.getElementById('bRec').textContent='⏹ Detener';
   document.getElementById('bRec').classList.add('rec','on');
   document.getElementById('recBadge').classList.add('show');
-  notif('⏺ Grabando con audio — micrófono + videos');
+  notif('⏺ Grabando con audio');
 }
 
 function stopRec(){
-  recOn = false;
-  if(mediaRec && mediaRec.state !== 'inactive') mediaRec.stop();
-  // Cerrar AudioContext
-  if(audioCtxRec){
-    try { audioCtxRec.close(); } catch(_){}
-    audioCtxRec = null;
-  }
-  document.getElementById('bRec').textContent = '⏺ Grabar';
+  recOn=false;
+  if(mediaRec&&mediaRec.state!=='inactive') mediaRec.stop();
+  if(audioCtxRec){ try{audioCtxRec.close();}catch(_){} audioCtxRec=null; }
+  document.getElementById('bRec').textContent='⏺ Grabar';
   document.getElementById('bRec').classList.remove('rec','on');
   document.getElementById('recBadge').classList.remove('show');
 }
 
 function saveRec(){
-  if(!recChunks.length){ notif('⚠️ Grabación vacía'); return; }
-  var blob = new Blob(recChunks, { type: recChunks[0].type || 'video/webm' });
-  var ext  = blob.type.includes('mp4') ? 'mp4' : 'webm';
-  var url  = URL.createObjectURL(blob);
-  var a    = document.createElement('a');
-  a.href = url;
-  a.download = 'clase_' + Date.now() + '.' + ext;
-  a.click();
-  setTimeout(function(){ URL.revokeObjectURL(url); }, 8000);
-  notif('✅ Grabación guardada con audio — ' + ext.toUpperCase());
+  if(!recChunks.length){notif('⚠️ Grabación vacía');return;}
+  var blob=new Blob(recChunks,{type:recChunks[0].type||'video/webm'});
+  var ext=blob.type.includes('mp4')?'mp4':'webm';
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url; a.download='clase_'+Date.now()+'.'+ext; a.click();
+  setTimeout(function(){URL.revokeObjectURL(url);},8000);
+  notif('✅ Grabación guardada — '+ext.toUpperCase());
 }
 
 // ═══════════════════════════════════
-// CONTROLES DE VIDEO FLOTANTES
+// RENDER LOOP PRINCIPAL
 // ═══════════════════════════════════
-function createVidCtrl(o){
-  var ctrl = document.createElement('div');
-  ctrl.className = 'vid-ctrl';
-
-  var btnPlay   = document.createElement('button');
-  btnPlay.textContent = '▶';
-  btnPlay.title = 'Play/Pause';
-
-  var prog = document.createElement('input');
-  prog.type='range'; prog.min=0; prog.max=1000; prog.value=0;
-  prog.style.width='85px';
-
-  var timeLabel = document.createElement('span');
-  timeLabel.style.cssText = 'color:#aaa;font-size:10px;min-width:38px;flex-shrink:0;';
-  timeLabel.textContent = '0:00';
-
-  var btnMute = document.createElement('button');
-  btnMute.textContent = '🔊';
-
-  var volSlider = document.createElement('input');
-  volSlider.type='range'; volSlider.min=0; volSlider.max=100; volSlider.value=80;
-  volSlider.style.width='50px';
-
-  ctrl.appendChild(btnPlay);
-  ctrl.appendChild(prog);
-  ctrl.appendChild(timeLabel);
-  ctrl.appendChild(btnMute);
-  ctrl.appendChild(volSlider);
-  cwEl.appendChild(ctrl);
-  o.ctrl = ctrl;
-
-  var vid = o.el;
-  vid.volume = 0.8;
-
-  // ── Play / Pause ──────────────────
-  btnPlay.addEventListener('click', function(){
-    if(vid.paused || vid.ended){
-      var p = vid.play();
-      if(p && p.then){
-        p.then(function(){
-          btnPlay.textContent = '⏸';
-        }).catch(function(){
-          // En algunos Android hay que intentar una vez más
-          setTimeout(function(){
-            vid.play().then(function(){ btnPlay.textContent='⏸'; }).catch(function(){});
-          }, 300);
-        });
-      } else {
-        btnPlay.textContent = '⏸';
-      }
-    } else {
-      vid.pause();
-      btnPlay.textContent = '▶';
-    }
-  });
-
-  // ── Progreso (seekbar) ────────────
-  var isSeeking  = false;
-  var wasPlaying = false;
-
-  vid.addEventListener('timeupdate', function(){
-    if(!isSeeking && vid.duration){
-      prog.value = Math.round(vid.currentTime / vid.duration * 1000);
-      var cur = vid.currentTime, tot = vid.duration;
-      var m=Math.floor(cur/60), s=Math.floor(cur%60);
-      var tm=Math.floor(tot/60), ts=Math.floor(tot%60);
-      timeLabel.textContent = m+':'+(s<10?'0':'')+s+' / '+tm+':'+(ts<10?'0':'')+ts;
-    }
-  });
-
-  // Inicio del drag: pausar y recordar si estaba reproduciendo
-  prog.addEventListener('mousedown', function(){
-    isSeeking  = true;
-    wasPlaying = !vid.paused;
-    if(wasPlaying) vid.pause();
-  });
-  prog.addEventListener('touchstart', function(){
-    isSeeking  = true;
-    wasPlaying = !vid.paused;
-    if(wasPlaying) vid.pause();
-  }, {passive:true});
-
-  // Durante el drag: solo mover sin reproducir
-  prog.addEventListener('input', function(){
-    if(vid.duration){
-      var t = prog.value / 1000 * vid.duration;
-      try { vid.currentTime = t; } catch(e){}
-    }
-  });
-
-  // Fin del drag: esperar seeked y reanudar si estaba reproduciendo
-  function onSeekEnd(){
-    if(!isSeeking) return;
-    isSeeking = false;
-    // Esperar a que el seek termine antes de reanudar
-    function doResume(){
-      if(wasPlaying){
-        vid.play().then(function(){
-          btnPlay.textContent = '⏸';
-        }).catch(function(){
-          // Segundo intento tras breve pausa
-          setTimeout(function(){
-            vid.play().then(function(){ btnPlay.textContent='⏸'; }).catch(function(){});
-          }, 400);
-        });
-      }
-    }
-    // Usar el evento seeked para saber cuándo está listo
-    if(vid.seeking){
-      vid.addEventListener('seeked', function onSeeked(){
-        vid.removeEventListener('seeked', onSeeked);
-        doResume();
-      });
-    } else {
-      doResume();
-    }
-  }
-
-  prog.addEventListener('mouseup',  onSeekEnd);
-  prog.addEventListener('touchend', onSeekEnd, {passive:true});
-
-  // ── Mute ─────────────────────────
-  btnMute.addEventListener('click', function(){
-    vid.muted = !vid.muted;
-    btnMute.textContent = vid.muted ? '🔇' : '🔊';
-  });
-
-  // ── Volumen ───────────────────────
-  volSlider.addEventListener('input', function(){
-    vid.volume = volSlider.value / 100;
-    vid.muted  = (vid.volume === 0);
-    btnMute.textContent = vid.muted ? '🔇' : '🔊';
-  });
-
-  // ── Estado ────────────────────────
-  vid.addEventListener('ended',   function(){ btnPlay.textContent='▶'; });
-  vid.addEventListener('pause',   function(){ btnPlay.textContent='▶'; });
-  vid.addEventListener('playing', function(){ btnPlay.textContent='⏸'; });
-  vid.addEventListener('waiting', function(){ btnPlay.textContent='⌛'; });
-  vid.addEventListener('canplay', function(){
-    if(!vid.paused) btnPlay.textContent='⏸';
-  });
-
-  // Evitar que toques en controles lleguen al canvas
-  ctrl.addEventListener('pointerdown', function(e){ e.stopPropagation(); });
-  ctrl.addEventListener('touchstart',  function(e){ e.stopPropagation(); }, {passive:true});
-
-  positionVidCtrl(o);
-}
-
-function positionVidCtrl(o){
-  if(!o.ctrl) return;
-  o.ctrl.style.left = o.x + 'px';
-  o.ctrl.style.top  = (o.y + o.h + 4) + 'px';
-  // si se sale de la pantalla, ponerlo arriba del video
-  var ctrlH=40;
-  if(o.y + o.h + ctrlH > H){
-    o.ctrl.style.top = Math.max(0, o.y - ctrlH - 4) + 'px';
-  }
-}
+(function loop(){
+  drawFrame(ctx);
+  if(selId!=null) drawHandles();
+  if(recOn) drawFrame(rctx);
+  updateVidBar();
+  requestAnimationFrame(loop);
+})();
 
 // ═══════════════════════════════════
 // DESCARGAR PNG
@@ -890,7 +829,7 @@ function notif(msg){
   el._t=setTimeout(function(){el.classList.remove('show');},4000);
 }
 
-notif('🎨 Pizarra lista — Imagen y Video con audio disponibles');
+notif('🎨 Pizarra lista');
 </script>
 </body>
 </html>
