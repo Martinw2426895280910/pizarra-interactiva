@@ -471,15 +471,22 @@ document.getElementById('bVid').onclick=function(){openPanel('vid');};
 document.getElementById('btnClosePanel').onclick=function(){filePanel.classList.remove('show');};
 
 fileIn.addEventListener('change',function(e){
-  var files=e.target.files;
-  if(!files||!files.length){return;}
+  var files = e.target.files;
+  if(!files || !files.length){ return; }
   filePanel.classList.remove('show');
   if(fileMode==='img'){
-    for(var i=0;i<files.length;i++) loadImage(files[i]);
+    // Para imágenes: leer todos y limpiar
+    var copies = Array.from(files);
+    // Limpiar después de un tick para que los File objects estén disponibles
+    setTimeout(function(){ fileIn.value=''; }, 100);
+    copies.forEach(function(f){ loadImage(f); });
   } else {
-    loadVideo(files[0]);
+    // Para video: guardar referencia al File, NO limpiar el input todavía
+    var videoFile = files[0];
+    loadVideo(videoFile);
+    // Limpiar recién después de que el video esté listo (5 segundos de margen)
+    setTimeout(function(){ fileIn.value=''; }, 6000);
   }
-  e.target.value='';
 });
 
 // ═══════════════════════════════════
@@ -504,36 +511,68 @@ function loadImage(file){
 }
 
 // ═══════════════════════════════════
-// CARGAR VIDEO — createObjectURL (instantáneo, sin base64)
+// CARGAR VIDEO — robusto para Android
 // ═══════════════════════════════════
 function loadVideo(file){
   if(!file.type.startsWith('video/')){notif('⚠️ Solo videos');return;}
   notif('⏳ Cargando video…');
+
   var url = URL.createObjectURL(file);
   var vid = document.createElement('video');
-  vid.src        = url;
-  vid.muted      = false;
-  vid.playsInline= true;
-  vid.preload    = 'metadata';
-  vid.setAttribute('playsinline','');
 
-  vid.onloadedmetadata=function(){
-    var aspect = (vid.videoWidth/vid.videoHeight) || (16/9);
-    var maxW   = Math.min(W*0.75, 420);
-    var iw=maxW, ih=maxW/aspect;
-    if(ih>H*0.65){ih=H*0.65; iw=ih*aspect;}
+  vid.playsInline  = true;
+  vid.muted        = false;
+  vid.preload      = 'auto';  // cargar todo el buffer, no solo metadata
+  vid.setAttribute('playsinline','');
+  vid.setAttribute('webkit-playsinline','');
+
+  // Guardar referencia al file para que el GC no lo elimine
+  vid._fileRef = file;
+  vid._blobUrl = url;
+
+  var ready = false;
+  function onReady(){
+    if(ready) return;
+    ready = true;
+    var vw = vid.videoWidth  || 640;
+    var vh = vid.videoHeight || 360;
+    var aspect = vw / vh;
+    var maxW = Math.min(W * 0.80, 480);
+    var iw = maxW, ih = maxW / aspect;
+    if(ih > H * 0.70){ ih = H * 0.70; iw = ih * aspect; }
+    iw = Math.round(iw); ih = Math.round(ih);
     var id  = objSeq++;
-    var obj = {id:id,type:'vid',el:vid,x:(W-iw)/2,y:(H-ih)/2,w:iw,h:ih,ctrl:null};
+    var obj = {id:id, type:'vid', el:vid, x:Math.round((W-iw)/2), y:Math.round((H-ih)/2), w:iw, h:ih, ctrl:null};
     objs.push(obj);
-    selId=id; setTool('select'); showDelBtn(true);
+    selId = id;
+    setTool('select');
+    showDelBtn(true);
     createVidCtrl(obj);
     notif('🎬 Video listo — tocá ▶ para reproducir con audio');
+  }
+
+  vid.onloadedmetadata = onReady;
+  vid.oncanplay        = onReady;  // fallback si metadata no dispara
+  vid.onloadeddata     = onReady;  // segundo fallback
+
+  // Timeout de seguridad — si ningún evento dispara en 4s, intentar igual
+  setTimeout(function(){
+    if(!ready){
+      vid.load(); // forzar carga
+      setTimeout(function(){ if(!ready) onReady(); }, 1500);
+    }
+  }, 4000);
+
+  vid.onerror = function(){
+    if(!ready){
+      URL.revokeObjectURL(url);
+      notif('❌ Error al cargar el video. Probá con un archivo .mp4');
+    }
   };
 
-  vid.onerror=function(){
-    URL.revokeObjectURL(url);
-    notif('❌ No se pudo cargar el video — probá con otro formato (mp4)');
-  };
+  // Asignar src DESPUÉS de configurar todos los handlers
+  vid.src = url;
+  vid.load();
 }
 
 // ═══════════════════════════════════
@@ -590,27 +629,27 @@ function saveRec(){
 // CONTROLES DE VIDEO FLOTANTES
 // ═══════════════════════════════════
 function createVidCtrl(o){
-  var ctrl=document.createElement('div');
-  ctrl.className='vid-ctrl';
-  ctrl.setAttribute('data-vid-id', o.id);
+  var ctrl = document.createElement('div');
+  ctrl.className = 'vid-ctrl';
 
-  var btnPlay=document.createElement('button');
-  btnPlay.textContent='▶';
+  var btnPlay   = document.createElement('button');
+  btnPlay.textContent = '▶';
+  btnPlay.title = 'Play/Pause';
 
-  var prog=document.createElement('input');
+  var prog = document.createElement('input');
   prog.type='range'; prog.min=0; prog.max=1000; prog.value=0;
-  prog.style.width='80px';
+  prog.style.width='85px';
 
-  var btnMute=document.createElement('button');
-  btnMute.textContent='🔊';
+  var timeLabel = document.createElement('span');
+  timeLabel.style.cssText = 'color:#aaa;font-size:10px;min-width:38px;flex-shrink:0;';
+  timeLabel.textContent = '0:00';
 
-  var volSlider=document.createElement('input');
+  var btnMute = document.createElement('button');
+  btnMute.textContent = '🔊';
+
+  var volSlider = document.createElement('input');
   volSlider.type='range'; volSlider.min=0; volSlider.max=100; volSlider.value=80;
-  volSlider.style.width='55px';
-
-  var timeLabel=document.createElement('span');
-  timeLabel.style.cssText='color:#aaa;font-size:10px;min-width:35px;';
-  timeLabel.textContent='0:00';
+  volSlider.style.width='50px';
 
   ctrl.appendChild(btnPlay);
   ctrl.appendChild(prog);
@@ -618,59 +657,89 @@ function createVidCtrl(o){
   ctrl.appendChild(btnMute);
   ctrl.appendChild(volSlider);
   cwEl.appendChild(ctrl);
-  o.ctrl=ctrl;
+  o.ctrl = ctrl;
 
-  var vid=o.el;
-  vid.volume=0.8;
+  var vid = o.el;
+  vid.volume = 0.8;
 
-  // Play/pause
-  btnPlay.addEventListener('click',function(){
-    if(vid.paused){
-      // En Android necesita interacción directa para play con audio
-      vid.play().then(function(){
-        btnPlay.textContent='⏸';
-      }).catch(function(err){
-        notif('⚠️ Tocá directamente el botón ▶ para reproducir');
-      });
+  // ── Play / Pause ──────────────────
+  btnPlay.addEventListener('click', function(){
+    if(vid.paused || vid.ended){
+      var p = vid.play();
+      if(p && p.then){
+        p.then(function(){
+          btnPlay.textContent = '⏸';
+        }).catch(function(){
+          // En algunos Android hay que intentar una vez más
+          setTimeout(function(){
+            vid.play().then(function(){ btnPlay.textContent='⏸'; }).catch(function(){});
+          }, 300);
+        });
+      } else {
+        btnPlay.textContent = '⏸';
+      }
     } else {
       vid.pause();
-      btnPlay.textContent='▶';
+      btnPlay.textContent = '▶';
     }
   });
 
-  // Progreso
-  vid.addEventListener('timeupdate',function(){
+  // ── Progreso (seekbar) ────────────
+  var isSeeking = false;
+
+  // Actualizar barra mientras reproduce
+  vid.addEventListener('timeupdate', function(){
+    if(!isSeeking && vid.duration){
+      prog.value = Math.round(vid.currentTime / vid.duration * 1000);
+      var tot = vid.duration;
+      var cur = vid.currentTime;
+      var m = Math.floor(cur/60);
+      var s = Math.floor(cur % 60);
+      var tm = Math.floor(tot/60);
+      var ts = Math.floor(tot % 60);
+      timeLabel.textContent = m+':'+(s<10?'0':'')+s+' / '+tm+':'+(ts<10?'0':'')+ts;
+    }
+  });
+
+  // Al arrastrar la barra, pausar momentáneamente para evitar cortes
+  prog.addEventListener('mousedown',  function(){ isSeeking=true; });
+  prog.addEventListener('touchstart', function(){ isSeeking=true; }, {passive:true});
+
+  prog.addEventListener('input', function(){
     if(vid.duration){
-      prog.value=Math.round(vid.currentTime/vid.duration*1000);
-      var m=Math.floor(vid.currentTime/60);
-      var s=Math.floor(vid.currentTime%60);
-      timeLabel.textContent=m+':'+(s<10?'0':'')+s;
+      // Solo mover el tiempo, no pausar
+      vid.currentTime = prog.value / 1000 * vid.duration;
     }
   });
 
-  prog.addEventListener('input',function(){
-    if(vid.duration) vid.currentTime=prog.value/1000*vid.duration;
+  prog.addEventListener('mouseup',  function(){ isSeeking=false; });
+  prog.addEventListener('touchend', function(){ isSeeking=false; }, {passive:true});
+
+  // ── Mute ─────────────────────────
+  btnMute.addEventListener('click', function(){
+    vid.muted = !vid.muted;
+    btnMute.textContent = vid.muted ? '🔇' : '🔊';
   });
 
-  // Mute
-  btnMute.addEventListener('click',function(){
-    vid.muted=!vid.muted;
-    btnMute.textContent=vid.muted?'🔇':'🔊';
+  // ── Volumen ───────────────────────
+  volSlider.addEventListener('input', function(){
+    vid.volume = volSlider.value / 100;
+    vid.muted  = (vid.volume === 0);
+    btnMute.textContent = vid.muted ? '🔇' : '🔊';
   });
 
-  // Volumen
-  volSlider.addEventListener('input',function(){
-    vid.volume=volSlider.value/100;
-    if(vid.volume===0){vid.muted=true;btnMute.textContent='🔇';}
-    else{vid.muted=false;btnMute.textContent='🔊';}
+  // ── Estado ────────────────────────
+  vid.addEventListener('ended',   function(){ btnPlay.textContent='▶'; });
+  vid.addEventListener('pause',   function(){ btnPlay.textContent='▶'; });
+  vid.addEventListener('playing', function(){ btnPlay.textContent='⏸'; });
+  vid.addEventListener('waiting', function(){ btnPlay.textContent='⌛'; });
+  vid.addEventListener('canplay', function(){
+    if(!vid.paused) btnPlay.textContent='⏸';
   });
 
-  // Al terminar
-  vid.addEventListener('ended',function(){btnPlay.textContent='▶';});
-
-  // Evitar que los toques en controles disparen el canvas
-  ctrl.addEventListener('pointerdown',function(e){e.stopPropagation();});
-  ctrl.addEventListener('touchstart',function(e){e.stopPropagation();},{passive:true});
+  // Evitar que toques en controles lleguen al canvas
+  ctrl.addEventListener('pointerdown', function(e){ e.stopPropagation(); });
+  ctrl.addEventListener('touchstart',  function(e){ e.stopPropagation(); }, {passive:true});
 
   positionVidCtrl(o);
 }
